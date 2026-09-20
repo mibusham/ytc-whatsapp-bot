@@ -207,9 +207,8 @@ async function executeFindingsBlast(triggerSource = 'Scheduled') {
     await new Promise(r => setTimeout(r, 2500));
   }
 
-  // 3. Send Closing Footer Link
+  // 3. Send Closing Footer Message
   const footerMsg = `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🔗 *Live Safety Dashboard:* https://ytcsafety.vercel.app/\n` +
     `_Mesej ini dihantar secara automatik oleh YTC Safety Inspection Bot._`;
   await sock.sendMessage(groupId, { text: footerMsg });
 
