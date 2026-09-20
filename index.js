@@ -4,6 +4,8 @@ const cron = require('node-cron');
 const qrcode = require('qrcode');
 const { createClient } = require('@supabase/supabase-js');
 const pino = require('pino');
+const fs = require('fs');
+const path = require('path');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -19,6 +21,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://xhuyehfiebcmoolfkumz.s
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhodXllaGZpZWJjbW9vbGZrdW16Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM1MzgxNjEsImV4cCI6MjA3OTExNDE2MX0.DVy_g-cQTjc-pLjD348sd4JtYNKdN-2lx9A23DXUkO0';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+const AUTH_DIR = path.resolve(__dirname, 'auth_info_baileys');
+
 // Bot State
 let sock = null;
 let currentQrCode = null;
@@ -32,38 +36,77 @@ let lastBlastResult = null;
 const TARGET_GROUP_NAME = process.env.TARGET_GROUP_NAME || 'Workers Safety';
 
 /**
- * Generate Actionable Safety Guidance based on Finding Description & Risk Level
+ * Restore WhatsApp Auth Session from Supabase Cloud
  */
-function getRecommendedAction(description, riskLevel) {
-  const descLower = (description || '').toLowerCase();
+async function restoreAuthFromSupabase() {
+  try {
+    const { data, error } = await supabase
+      .from('site_logs')
+      .select('files')
+      .eq('date', 'BOT_AUTH_STATE')
+      .maybeSingle();
 
-  if (descLower.includes('fire extinguisher') || descLower.includes('pemadam api')) {
-    return '1. Gantikan alat pemadam api yang rosak/tamat tempoh dengan unit 9kg ABC sah.\n2. Pastikan tag pemeriksaan bomba lengkap dan digantung di tempat yang mudah dilihat.';
-  }
-  if (descLower.includes('scaffold') || descLower.includes('perancah') || descLower.includes('toe-board') || descLower.includes('guardrail')) {
-    return '1. Hentikan kerja di kawasan perancah sehingga pembaikan selesai.\n2. Pasang toe-board standard, guardrail dan kemaskan ikatan safety netting.\n3. Dapatkan pemeriksaan semula daripada Scaffold Competent Person.';
-  }
-  if (descLower.includes('drain') || descLower.includes('longkang') || descLower.includes('maintenance')) {
-    return '1. Lakukan kerja pembersihan dan servis saliran/longkang serta-merta.\n2. Pastikan tiada halangan aliran air bagi mengelakkan air bertakung dan risiko pembiakan nyamuk.';
-  }
-  if (descLower.includes('dam') || descLower.includes('check dam')) {
-    return '1. Pasang check dam mengikut spesifikasi kawalan hakisan dan kelodak (ESCP).\n2. Bersihkan endapan kelodak yang terkumpul.';
-  }
-  if (descLower.includes('barricade') || descLower.includes('penghadang')) {
-    return '1. Pasang penghadang keselamatan (hard barricade) di sekeliling zon kerja berisiko.\n2. Letakkan papan tanda amaran BAHAYA / DILARANG MASUK yang jelas.';
-  }
-  if (descLower.includes('signage') || descLower.includes('papan tanda')) {
-    return '1. Pasang papan tanda keselamatan standard di lokasi yang ditetapkan.\n2. Pastikan tulisan terang dan tidak terlindung oleh bahan binaan.';
-  }
-  if (descLower.includes('waste') || descLower.includes('roro') || descLower.includes('sisa')) {
-    return '1. Hubungi kontraktor sisa untuk pelupusan tong RORO serta-merta.\n2. Lakukan housekeeping di sekeliling tong sisa dan elakkan sisa melimpah ke laluan pejalan kaki.';
-  }
+    if (error || !data || !data.files || typeof data.files !== 'object') {
+      console.log('[Auth Persistence] Tiada sesi WhatsApp tersimpan di Supabase.');
+      return false;
+    }
 
-  if (riskLevel === 'High') {
-    return '1. HENTIKAN KERJA serta-merta di zon terlibat sehingga pembetulan dibuat.\n2. Maklumkan kepada Safety Officer untuk pengesahan pembetulan sebelum sambung semula kerja.';
-  }
+    if (!fs.existsSync(AUTH_DIR)) {
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
+    }
 
-  return '1. Lakukan tindakan pembetulan dan pembersihan di lokasi serta-merta.\n2. Maklumkan kepada Safety Supervisor setelah keadaan disahkan selamat.';
+    const files = data.files;
+    let count = 0;
+    for (const [filename, content] of Object.entries(files)) {
+      if (filename && typeof content === 'string') {
+        fs.writeFileSync(path.join(AUTH_DIR, filename), content, 'utf-8');
+        count++;
+      }
+    }
+    console.log(`[Auth Persistence] ✅ Berjaya restore ${count} fail sesi login WhatsApp dari Supabase!`);
+    return count > 0;
+  } catch (err) {
+    console.error('[Auth Restore Error]:', err);
+    return false;
+  }
+}
+
+/**
+ * Backup WhatsApp Auth Session to Supabase Cloud (Debounced)
+ */
+let saveDebounceTimer = null;
+function backupAuthToSupabase() {
+  if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+  saveDebounceTimer = setTimeout(async () => {
+    try {
+      if (!fs.existsSync(AUTH_DIR)) return;
+      const fileNames = fs.readdirSync(AUTH_DIR);
+      if (fileNames.length === 0) return;
+
+      const filesObj = {};
+      for (const name of fileNames) {
+        const fullPath = path.join(AUTH_DIR, name);
+        if (fs.statSync(fullPath).isFile()) {
+          filesObj[name] = fs.readFileSync(fullPath, 'utf-8');
+        }
+      }
+
+      const { error } = await supabase
+        .from('site_logs')
+        .upsert({
+          date: 'BOT_AUTH_STATE',
+          files: filesObj
+        }, { onConflict: 'date' });
+
+      if (error) {
+        console.error('[Auth Backup Error] Gagal simpan sesi ke Supabase:', error);
+      } else {
+        console.log(`[Auth Backup] ✅ Berjaya simpan ${fileNames.length} fail sesi WhatsApp ke Supabase Cloud.`);
+      }
+    } catch (err) {
+      console.error('[Auth Backup Exception]:', err);
+    }
+  }, 2500);
 }
 
 /**
@@ -207,7 +250,7 @@ async function executeFindingsBlast(triggerSource = 'Scheduled') {
     await new Promise(r => setTimeout(r, 2500));
   }
 
-  // 3. Send Closing Footer Message
+  // 3. Send Closing Footer Message (Tanpa sebarang link dashboard)
   const footerMsg = `━━━━━━━━━━━━━━━━━━━━━\n` +
     `_Mesej ini dihantar secara automatik oleh YTC Safety Inspection Bot._`;
   await sock.sendMessage(groupId, { text: footerMsg });
@@ -223,10 +266,12 @@ async function executeFindingsBlast(triggerSource = 'Scheduled') {
 }
 
 /**
- * Initialize Baileys WhatsApp Connection
+ * Initialize Baileys WhatsApp Connection with Supabase Persistence
  */
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
+  await restoreAuthFromSupabase();
+
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
@@ -237,7 +282,10 @@ async function connectToWhatsApp() {
     browser: ['YTC Safety Bot', 'Chrome', '1.0.0']
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    backupAuthToSupabase();
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -246,19 +294,26 @@ async function connectToWhatsApp() {
       currentQrCode = qr;
       qrDataUrl = await qrcode.toDataURL(qr);
       connectionStatus = 'qr_ready';
-      console.log('\n[WhatsApp QR Code Ready] Buka browser di http://localhost:3000/qr atau Render link untuk scan.\n');
+      console.log('\n[WhatsApp QR Code Ready] Buka browser di /qr untuk scan.\n');
     }
 
     if (connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('[Connection Closed] Reconnecting:', shouldReconnect);
+      const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(`[Connection Closed] Status code: ${statusCode}, reconnecting: ${shouldReconnect}`);
       connectionStatus = 'disconnected';
+
       if (shouldReconnect) {
-        setTimeout(connectToWhatsApp, 5000);
+        setTimeout(connectToWhatsApp, 4000);
       } else {
-        console.log('[Logged Out] Sila scan semula QR code.');
+        console.log('[Logged Out] WhatsApp logout dikesan. Memadamkan sesi lama.');
+        await supabase.from('site_logs').delete().eq('date', 'BOT_AUTH_STATE');
+        if (fs.existsSync(AUTH_DIR)) {
+          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        }
         currentQrCode = null;
         qrDataUrl = null;
+        setTimeout(connectToWhatsApp, 2000);
       }
     } else if (connection === 'open') {
       connectionStatus = 'connected';
@@ -266,6 +321,7 @@ async function connectToWhatsApp() {
       qrDataUrl = null;
       botUser = sock.user;
       console.log('\n✅ [WhatsApp Connected!] Bot sedia bertugas sebagai:', botUser.name || botUser.id);
+      backupAuthToSupabase();
     }
   });
 }
@@ -289,7 +345,7 @@ app.get('/', async (req, res) => {
       <title>YTC Safety WhatsApp Bot</title>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; padding: 24px; }
-        .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; overflow: hidden; }
+        .card { max-width: 620px; margin: 0 auto; background: #ffffff; border-radius: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; overflow: hidden; }
         .header { background: #0f172a; color: #fff; padding: 24px; text-align: center; }
         .content { padding: 24px; }
         .status-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; font-weight: bold; font-size: 13px; }
@@ -297,6 +353,7 @@ app.get('/', async (req, res) => {
         .btn-green { background: #10b981; }
         .btn-amber { background: #f59e0b; }
         .info-box { background: #f1f5f9; padding: 16px; border-radius: 12px; margin: 16px 0; font-size: 14px; }
+        .cloud-badge { background: #e0f2fe; color: #0369a1; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 12px; display: inline-block; margin-top: 6px; }
       </style>
     </head>
     <body>
@@ -316,9 +373,10 @@ app.get('/', async (req, res) => {
 
           <div class="info-box">
             <p style="margin: 4px 0;"><strong>Target Group:</strong> ${TARGET_GROUP_NAME}</p>
-            <p style="margin: 4px 0;"><strong>Pending Findings Aktif:</strong> <span style="color:#ef4444; font-weight:bold;">${pending.length} Isu</span></p>
+            <p style="margin: 4px 0;"><strong>Pending Findings Aktif:</strong> <span style="color:#ef4444; font-weight:bold;">${pending.length} Isu (Everine)</span></p>
             <p style="margin: 4px 0;"><strong>Semakan Terakhir:</strong> ${lastCheckTime || 'Belum dijalankan'}</p>
             <p style="margin: 4px 0;"><strong>Jadual Harian:</strong> 🌅 8:30 AM & 🌇 4:30 PM (MYT)</p>
+            <div class="cloud-badge">☁️ Cloud Persistence: Sesi Disimpan di Supabase (Kekal)</div>
           </div>
 
           ${connectionStatus !== 'connected' ? `
@@ -335,6 +393,12 @@ app.get('/', async (req, res) => {
               <strong>Keputusan Terkini:</strong> ${lastBlastResult.message}
             </div>
           ` : ''}
+
+          <div style="margin-top: 24px; padding: 12px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; font-size: 12px; color: #92400e;">
+            <strong>🔗 Webhook URL untuk Cron-Job:</strong><br/>
+            <code>https://ytc-safety-bot.onrender.com/api/blast</code><br/>
+            <span style="opacity: 0.85;">Panggil URL ini melalui cron-job.org untuk auto-wake & blast jam 8:30 AM & 4:30 PM tanpa gagal.</span>
+          </div>
         </div>
       </div>
     </body>
@@ -367,7 +431,7 @@ app.get('/qr', (req, res) => {
         <h3 style="margin-top:0;">📱 Sambungkan WhatsApp</h3>
         <p style="font-size:12px; color:#64748b;">Buka WhatsApp di telefon &gt; Peranti Terpaut (Linked Devices) &gt; Pautkan Peranti (Link a Device):</p>
         ${qrDataUrl ? `<img src="${qrDataUrl}" alt="Scan QR" />` : `<p>Menjana QR code...</p>`}
-        <p style="font-size:11px; color:#94a3b8; margin-bottom:0;">Halaman ini akan auto-refresh setiap 5 saat.</p>
+        <p style="font-size:11px; color:#94a3b8; margin-bottom:0;">Halaman ini akan auto-refresh setiap 5 saat.<br/>Selepas berjaya disambung, sesi akan disimpan kekal ke Supabase.</p>
       </div>
     </body>
     </html>
@@ -395,14 +459,59 @@ app.get('/groups', async (req, res) => {
   }
 });
 
-// Manual Test Trigger
+// Manual Test Trigger via Web Button
 app.get('/test-blast', async (req, res) => {
-  const result = await executeFindingsBlast('Manual Test via Web');
+  await executeFindingsBlast('Manual Test via Web');
   res.redirect('/');
 });
 
+// Dedicated Webhook Endpoint for Cron-Job.org / External Scheduler
+app.all('/api/blast', async (req, res) => {
+  console.log('[Webhook Call] Menerima panggilan /api/blast dari:', req.ip || req.headers['x-forwarded-for']);
+
+  // If cold-starting, wait up to 12 seconds for WhatsApp socket handshake
+  if (connectionStatus !== 'connected') {
+    console.log('[Webhook Call] Menunggu sambungan WhatsApp siap handshake...');
+    for (let i = 0; i < 12; i++) {
+      if (connectionStatus === 'connected') break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  if (connectionStatus !== 'connected') {
+    return res.status(503).json({
+      success: false,
+      message: 'WhatsApp bot belum bersambung. Sila buka /qr untuk scan dahulu.',
+      connectionStatus
+    });
+  }
+
+  try {
+    const result = await executeFindingsBlast('Cron Webhook (cron-job.org)');
+    return res.json({
+      success: true,
+      result
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// Health check / Uptime ping
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    botStatus: connectionStatus,
+    targetGroup: TARGET_GROUP_NAME,
+    time: new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur' })
+  });
+});
+
 // ----------------------------------------------------
-// CRON JOBS (Scheduled Automated Morning & Afternoon)
+// CRON JOBS (Internal Node-Cron Backup)
 // ----------------------------------------------------
 // Morning Blast: 8:30 AM MYT
 cron.schedule(process.env.CRON_MORNING || '30 8 * * *', () => {
