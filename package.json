@@ -1,0 +1,21 @@
+{
+  "name": "ytc-safety-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "Automated WhatsApp Bot for YTC Safety Dashboard - Posts pending site findings to workers safety group",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "pino": "^8.20.0",
+    "qrcode": "^1.5.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
