@@ -67,14 +67,14 @@ function getRecommendedAction(description, riskLevel) {
 }
 
 /**
- * Fetch Pending Findings from Supabase for both Dawson & Everine
+ * Fetch Pending Findings from Supabase for Everine site only
  */
 async function fetchPendingFindings() {
   try {
     const { data, error } = await supabase
       .from('site_logs')
       .select('date, findings')
-      .in('date', ['2000-01-01', 'EVERINE_2000-01-01']);
+      .eq('date', 'EVERINE_2000-01-01');
 
     if (error) {
       console.error('[DB Error] Failed to fetch findings:', error);
@@ -83,13 +83,12 @@ async function fetchPendingFindings() {
 
     const pendingList = [];
     (data || []).forEach(row => {
-      const siteName = row.date === 'EVERINE_2000-01-01' ? 'Everine' : 'Dawson';
       const findings = Array.isArray(row.findings) ? row.findings : [];
       findings.forEach(f => {
         if (f && f.status === 'pending') {
           pendingList.push({
             ...f,
-            site: siteName
+            site: 'Everine'
           });
         }
       });
@@ -164,29 +163,27 @@ async function executeFindingsBlast(triggerSource = 'Scheduled') {
 
   // 1. Send Header Alert Message
   const headerMsg = `🚨 *PERINGATAN KESELAMATAN TAPAK — PENDING HAZARDS REPORT*\n` +
-    `📍 *Tapak:* YTC Eco Horizon (Dawson & Everine)\n` +
+    `📍 *Tapak:* YTC Everine\n` +
     `📅 *Masa Semakan:* ${lastCheckTime}\n` +
     `⚠️ *Jumlah Isu Belum Selesai:* ${pendingFindings.length} Finding(s)\n\n` +
     `Perhatian kepada semua Penyelia, Mandur & Subcon:\n` +
-    `Berikut adalah senarai isu keselamatan yang dikesan di tapak yang MEMERLUKAN TINDAKAN PEMBETULAN SEGERA.`;
+    `Berikut adalah senarai isu keselamatan di tapak Everine yang dikesan dan memerlukan tindakan segera.`;
 
   await sock.sendMessage(groupId, { text: headerMsg });
   await new Promise(r => setTimeout(r, 1500));
 
-  // 2. Send Each Finding with Photo & Detailed Actions
+  // 2. Send Each Finding with Photo & Concise Caption
   let sentCount = 0;
   for (let i = 0; i < pendingFindings.length; i++) {
     const f = pendingFindings[i];
     const riskBadge = f.riskLevel === 'High' ? '🔴 TINGGI (HIGH RISK)' : (f.riskLevel === 'Medium' ? '🟡 SEDERHANA' : '🟢 RENDAH');
-    const actionPlan = getRecommendedAction(f.description, f.riskLevel);
 
     const caption = 
       `⚠️ *ISU KESELAMATAN #${i + 1} OF ${pendingFindings.length}*\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `📍 *Tapak Projek:* YTC ${f.site}\n` +
+      `📍 *Tapak Projek:* YTC Everine\n` +
       `🚨 *Tahap Risiko:* ${riskBadge}\n` +
-      `📌 *Isu / Hazard:* \n"${f.description || 'Tiada keterangan'}"\n\n` +
-      `🛠️ *TINDAKAN ANDA (WHAT TO DO):*\n${actionPlan}\n\n` +
+      `📌 *Isu / Hazard:*\n"${f.description || 'Tiada keterangan'}"\n\n` +
       `⏰ *Status:* Belum Selesai (Pending)\n` +
       `📸 Sila ambil tindakan segera dan hantar bukti pembetulan.`;
 
