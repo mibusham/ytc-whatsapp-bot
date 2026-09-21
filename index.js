@@ -470,8 +470,8 @@ app.all('/api/blast', async (req, res) => {
   const caller = req.ip || req.headers['x-forwarded-for'] || 'External Cron';
   console.log('[Webhook Call] Menerima panggilan /api/blast dari:', caller);
 
-  // Return ultra-short HTTP 200 plain text so cron-job.org never triggers 'output too large' or timeout!
-  res.status(200).type('text/plain').send('OK');
+  // Return HTTP 204 No Content (0 bytes body) so cron-job.org is 100% GREEN and NEVER triggers 'output too large'!
+  res.status(204).end();
 
   // Run the blast asynchronously in background
   (async () => {
@@ -498,8 +498,8 @@ app.all('/api/blast', async (req, res) => {
 });
 
 // Health check / Uptime ping
-app.get('/health', (req, res) => {
-  res.status(200).type('text/plain').send('OK');
+app.all('/health', (req, res) => {
+  res.status(204).end();
 });
 
 // ----------------------------------------------------
