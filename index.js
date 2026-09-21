@@ -470,13 +470,8 @@ app.all('/api/blast', async (req, res) => {
   const caller = req.ip || req.headers['x-forwarded-for'] || 'External Cron';
   console.log('[Webhook Call] Menerima panggilan /api/blast dari:', caller);
 
-  // Return HTTP 200 immediately so cron-job.org never hits a 30s timeout on cold start!
-  res.status(200).json({
-    success: true,
-    message: 'Blast request accepted and executing in background.',
-    status: connectionStatus,
-    timestamp: new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur' })
-  });
+  // Return ultra-short HTTP 200 plain text so cron-job.org never triggers 'output too large' or timeout!
+  res.status(200).type('text/plain').send('OK');
 
   // Run the blast asynchronously in background
   (async () => {
@@ -504,12 +499,7 @@ app.all('/api/blast', async (req, res) => {
 
 // Health check / Uptime ping
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    botStatus: connectionStatus,
-    targetGroup: TARGET_GROUP_NAME,
-    time: new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur' })
-  });
+  res.status(200).type('text/plain').send('OK');
 });
 
 // ----------------------------------------------------
