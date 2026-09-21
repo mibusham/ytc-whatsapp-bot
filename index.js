@@ -219,26 +219,17 @@ async function executeFindingsBlast(triggerSource = 'Scheduled') {
   let sentCount = 0;
   for (let i = 0; i < pendingFindings.length; i++) {
     const f = pendingFindings[i];
-    const riskBadge = f.riskLevel === 'High' ? '🔴 TINGGI (HIGH RISK)' : (f.riskLevel === 'Medium' ? '🟡 SEDERHANA' : '🟢 RENDAH');
-
-    const caption = 
-      `⚠️ *ISU KESELAMATAN #${i + 1} OF ${pendingFindings.length}*\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `📍 *Tapak Projek:* YTC Everine\n` +
-      `🚨 *Tahap Risiko:* ${riskBadge}\n` +
-      `📌 *Isu / Hazard:*\n"${f.description || 'Tiada keterangan'}"\n\n` +
-      `⏰ *Status:* Belum Selesai (Pending)\n` +
-      `📸 Sila ambil tindakan segera dan hantar bukti pembetulan.`;
+    const caption = `⚠️ *ISU KESELAMATAN #${i + 1}*`;
 
     try {
       if (f.imageUrl && f.imageUrl.startsWith('http')) {
-        console.log(`[Sending #${i + 1}] Image with caption: ${f.description}`);
+        console.log(`[Sending #${i + 1}] Image with caption: ${caption}`);
         await sock.sendMessage(groupId, {
           image: { url: f.imageUrl },
           caption: caption
         });
       } else {
-        console.log(`[Sending #${i + 1}] Text only: ${f.description}`);
+        console.log(`[Sending #${i + 1}] Text only: ${caption}`);
         await sock.sendMessage(groupId, { text: caption });
       }
       sentCount++;
