@@ -242,8 +242,7 @@ async function executeFindingsBlast(triggerSource = 'Scheduled') {
   }
 
   // 3. Send Closing Footer Message (Tanpa sebarang link dashboard)
-  const footerMsg = `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `_Mesej ini dihantar secara automatik oleh YTC Safety Inspection Bot._`;
+  const footerMsg = `_Mesej ini dihantar secara automatik oleh YTC Safety Inspection Bot._`;
   await sock.sendMessage(groupId, { text: footerMsg });
 
   lastBlastResult = {
