@@ -467,37 +467,39 @@ app.get('/test-blast', async (req, res) => {
 
 // Dedicated Webhook Endpoint for Cron-Job.org / External Scheduler
 app.all('/api/blast', async (req, res) => {
-  console.log('[Webhook Call] Menerima panggilan /api/blast dari:', req.ip || req.headers['x-forwarded-for']);
+  const caller = req.ip || req.headers['x-forwarded-for'] || 'External Cron';
+  console.log('[Webhook Call] Menerima panggilan /api/blast dari:', caller);
 
-  // If cold-starting, wait up to 12 seconds for WhatsApp socket handshake
-  if (connectionStatus !== 'connected') {
-    console.log('[Webhook Call] Menunggu sambungan WhatsApp siap handshake...');
-    for (let i = 0; i < 12; i++) {
-      if (connectionStatus === 'connected') break;
-      await new Promise(r => setTimeout(r, 1000));
+  // Return HTTP 200 immediately so cron-job.org never hits a 30s timeout on cold start!
+  res.status(200).json({
+    success: true,
+    message: 'Blast request accepted and executing in background.',
+    status: connectionStatus,
+    timestamp: new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur' })
+  });
+
+  // Run the blast asynchronously in background
+  (async () => {
+    try {
+      // If cold-starting, wait up to 15 seconds for WhatsApp socket handshake
+      if (connectionStatus !== 'connected') {
+        console.log('[Webhook Background] Menunggu sambungan WhatsApp siap handshake...');
+        for (let i = 0; i < 15; i++) {
+          if (connectionStatus === 'connected') break;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+
+      if (connectionStatus !== 'connected') {
+        console.error('[Webhook Background] Gagal: WhatsApp bot belum bersambung.');
+        return;
+      }
+
+      await executeFindingsBlast('Cron Webhook (cron-job.org)');
+    } catch (err) {
+      console.error('[Webhook Background Error]:', err);
     }
-  }
-
-  if (connectionStatus !== 'connected') {
-    return res.status(503).json({
-      success: false,
-      message: 'WhatsApp bot belum bersambung. Sila buka /qr untuk scan dahulu.',
-      connectionStatus
-    });
-  }
-
-  try {
-    const result = await executeFindingsBlast('Cron Webhook (cron-job.org)');
-    return res.json({
-      success: true,
-      result
-    });
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
+  })();
 });
 
 // Health check / Uptime ping
