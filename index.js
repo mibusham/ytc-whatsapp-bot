@@ -109,8 +109,13 @@ function backupAuthToSupabase() {
   }, 2500);
 }
 
+// Blasting Lock & Cooldown State (Prevents double posting)
+let isBlasting = false;
+let lastBlastTimestamp = 0;
+const BLAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes cooldown between blasts
+
 /**
- * Fetch Pending Findings from Supabase for Everine site only
+ * Fetch Pending Findings from Supabase for Everine site only (Hazard & Log Finding)
  */
 async function fetchPendingFindings() {
   try {
@@ -124,19 +129,25 @@ async function fetchPendingFindings() {
       return [];
     }
 
+    const seenIds = new Set();
     const pendingList = [];
     (data || []).forEach(row => {
       const findings = Array.isArray(row.findings) ? row.findings : [];
       findings.forEach(f => {
-        if (f && f.status === 'pending') {
-          pendingList.push({
-            ...f,
-            site: 'Everine'
-          });
+        if (f && f.id && f.status === 'pending') {
+          const idStr = String(f.id);
+          if (!seenIds.has(idStr)) {
+            seenIds.add(idStr);
+            pendingList.push({
+              ...f,
+              site: 'Everine'
+            });
+          }
         }
       });
     });
 
+    console.log(`[Hazard & Findings Log] Diambil ${pendingList.length} isu pending unik dari tapak Everine.`);
     return pendingList;
   } catch (err) {
     console.error('[Exception] Error fetching findings:', err);
@@ -173,86 +184,120 @@ async function findTargetGroup() {
 
 /**
  * Execute Blast: Send Pending Findings to WhatsApp Group
+ * - force: set to true for manual test triggers to bypass cooldown
  */
-async function executeFindingsBlast(triggerSource = 'Scheduled') {
+async function executeFindingsBlast(triggerSource = 'Scheduled', force = false) {
+  const now = Date.now();
   lastCheckTime = new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur' });
+
+  // 1. Guard against concurrent blasting (Mutex Lock)
+  if (isBlasting) {
+    console.warn(`[Blast Aborted] Blast sedang berjalan (in progress). Duplicate trigger dari "${triggerSource}" diabaikan.`);
+    return { success: false, message: 'Blast already in progress', time: lastCheckTime };
+  }
+
+  // 2. Guard against double-blast within cooldown window (10 mins)
+  if (!force && (now - lastBlastTimestamp < BLAST_COOLDOWN_MS)) {
+    const elapsedSec = Math.round((now - lastBlastTimestamp) / 1000);
+    const remainingSec = Math.round((BLAST_COOLDOWN_MS - (now - lastBlastTimestamp)) / 1000);
+    console.warn(`[Blast Skipped] Blast baru sahaja dihantar ${elapsedSec}s lepas. Cooldown aktif (${remainingSec}s tinggal). Duplicate trigger dari "${triggerSource}" diabaikan.`);
+    return { 
+      success: true, 
+      count: lastBlastResult?.count || 0,
+      message: `Blast already sent ${elapsedSec}s ago. Cooldown active (${remainingSec}s left).`, 
+      time: lastCheckTime 
+    };
+  }
+
+  isBlasting = true;
   console.log(`\n========================================`);
   console.log(`[Blast Started] Trigger: ${triggerSource} at ${lastCheckTime}`);
 
-  if (connectionStatus !== 'connected' || !sock) {
-    const msg = 'Bot WhatsApp belum bersambung. Sila scan QR code terlebih dahulu.';
-    console.warn(`[Abort] ${msg}`);
-    lastBlastResult = { success: false, message: msg, time: lastCheckTime };
-    return lastBlastResult;
-  }
-
-  const groupId = await findTargetGroup();
-  if (!groupId) {
-    const msg = `Group WhatsApp "${TARGET_GROUP_NAME}" tidak dijumpai. Pastikan bot dimasukkan ke dalam group.`;
-    console.warn(`[Abort] ${msg}`);
-    lastBlastResult = { success: false, message: msg, time: lastCheckTime };
-    return lastBlastResult;
-  }
-
-  const pendingFindings = await fetchPendingFindings();
-  console.log(`[Found] ${pendingFindings.length} pending findings in dashboard.`);
-
-  if (pendingFindings.length === 0) {
-    const cleanMsg = `✅ *STATUS KESELAMATAN TAPAK YTC: 100% COMPLIANT*\n📅 ${lastCheckTime}\n\nSemua isu keselamatan (hazards) telah diselesaikan. Tiada sebarang pending finding buat masa ini. Terima kasih atas kerjasama semua team!`;
-    await sock.sendMessage(groupId, { text: cleanMsg });
-    lastBlastResult = { success: true, count: 0, message: 'All clear, no pending findings.', time: lastCheckTime };
-    return lastBlastResult;
-  }
-
-  // 1. Send Header Alert Message
-  const headerMsg = `🚨 *PERINGATAN KESELAMATAN TAPAK — PENDING HAZARDS REPORT*\n` +
-    `📍 *Tapak:* YTC Everine\n` +
-    `📅 *Masa Semakan:* ${lastCheckTime}\n` +
-    `⚠️ *Jumlah Isu Belum Selesai:* ${pendingFindings.length} Finding(s)\n\n` +
-    `Perhatian kepada semua Penyelia, Mandur & Subcon:\n` +
-    `Berikut adalah senarai isu keselamatan di tapak Everine yang dikesan dan memerlukan tindakan segera.`;
-
-  await sock.sendMessage(groupId, { text: headerMsg });
-  await new Promise(r => setTimeout(r, 1500));
-
-  // 2. Send Each Finding with Photo & Concise Caption
-  let sentCount = 0;
-  for (let i = 0; i < pendingFindings.length; i++) {
-    const f = pendingFindings[i];
-    const caption = `⚠️ *ISU KESELAMATAN #${i + 1}*`;
-
-    try {
-      if (f.imageUrl && f.imageUrl.startsWith('http')) {
-        console.log(`[Sending #${i + 1}] Image with caption: ${caption}`);
-        await sock.sendMessage(groupId, {
-          image: { url: f.imageUrl },
-          caption: caption
-        });
-      } else {
-        console.log(`[Sending #${i + 1}] Text only: ${caption}`);
-        await sock.sendMessage(groupId, { text: caption });
-      }
-      sentCount++;
-    } catch (sendErr) {
-      console.error(`[Error Sending #${i + 1}]:`, sendErr);
+  try {
+    if (connectionStatus !== 'connected' || !sock) {
+      const msg = 'Bot WhatsApp belum bersambung. Sila scan QR code terlebih dahulu.';
+      console.warn(`[Abort] ${msg}`);
+      lastBlastResult = { success: false, message: msg, time: lastCheckTime };
+      return lastBlastResult;
     }
 
-    // Delay between messages to avoid WhatsApp spam filters
-    await new Promise(r => setTimeout(r, 2500));
+    const groupId = await findTargetGroup();
+    if (!groupId) {
+      const msg = `Group WhatsApp "${TARGET_GROUP_NAME}" tidak dijumpai. Pastikan bot dimasukkan ke dalam group.`;
+      console.warn(`[Abort] ${msg}`);
+      lastBlastResult = { success: false, message: msg, time: lastCheckTime };
+      return lastBlastResult;
+    }
+
+    const pendingFindings = await fetchPendingFindings();
+    console.log(`[Found] ${pendingFindings.length} pending findings in dashboard.`);
+
+    if (pendingFindings.length === 0) {
+      const cleanMsg = `✅ *STATUS KESELAMATAN TAPAK YTC: 100% COMPLIANT*\n📅 ${lastCheckTime}\n\nSemua isu keselamatan (hazards) telah diselesaikan. Tiada sebarang pending finding buat masa ini. Terima kasih atas kerjasama semua team!`;
+      await sock.sendMessage(groupId, { text: cleanMsg });
+      lastBlastTimestamp = Date.now();
+      lastBlastResult = { success: true, count: 0, message: 'All clear, no pending findings.', time: lastCheckTime };
+      return lastBlastResult;
+    }
+
+    // A. Send Header Alert Message
+    const headerMsg = `🚨 *PERINGATAN KESELAMATAN TAPAK — PENDING HAZARDS REPORT*\n` +
+      `📍 *Tapak:* YTC Everine\n` +
+      `📅 *Masa Semakan:* ${lastCheckTime}\n` +
+      `⚠️ *Jumlah Isu Belum Selesai:* ${pendingFindings.length} Finding(s)\n\n` +
+      `Perhatian kepada semua Penyelia, Mandur & Subcon:\n` +
+      `Berikut adalah senarai isu keselamatan di tapak Everine yang dikesan dan memerlukan tindakan segera.`;
+
+    await sock.sendMessage(groupId, { text: headerMsg });
+    await new Promise(r => setTimeout(r, 1500));
+
+    // B. Send Each Finding with Photo & Concise Caption
+    let sentCount = 0;
+    for (let i = 0; i < pendingFindings.length; i++) {
+      const f = pendingFindings[i];
+      const caption = `⚠️ *ISU KESELAMATAN #${i + 1}*`;
+
+      try {
+        if (f.imageUrl && f.imageUrl.startsWith('http')) {
+          console.log(`[Sending #${i + 1}] Image with caption: ${caption}`);
+          try {
+            await sock.sendMessage(groupId, {
+              image: { url: f.imageUrl },
+              caption: caption
+            });
+          } catch (imgErr) {
+            console.warn(`[Fallback #${i + 1}] Gagal hantar imej, hantar teks:`, imgErr.message);
+            await sock.sendMessage(groupId, { text: caption });
+          }
+        } else {
+          console.log(`[Sending #${i + 1}] Text only: ${caption}`);
+          await sock.sendMessage(groupId, { text: caption });
+        }
+        sentCount++;
+      } catch (sendErr) {
+        console.error(`[Error Sending #${i + 1}]:`, sendErr);
+      }
+
+      // Delay between messages to avoid WhatsApp spam filters
+      await new Promise(r => setTimeout(r, 2500));
+    }
+
+    // C. Send Closing Footer Message (Tanpa sebarang link dashboard)
+    const footerMsg = `_Mesej ini dihantar secara automatik oleh YTC Safety Inspection Bot._`;
+    await sock.sendMessage(groupId, { text: footerMsg });
+
+    lastBlastTimestamp = Date.now();
+    lastBlastResult = {
+      success: true,
+      count: sentCount,
+      message: `Berjaya hantar ${sentCount} isu keselamatan ke group "${TARGET_GROUP_NAME}".`,
+      time: lastCheckTime
+    };
+    console.log(`[Blast Complete] ${lastBlastResult.message}\n========================================\n`);
+    return lastBlastResult;
+  } finally {
+    isBlasting = false;
   }
-
-  // 3. Send Closing Footer Message (Tanpa sebarang link dashboard)
-  const footerMsg = `_Mesej ini dihantar secara automatik oleh YTC Safety Inspection Bot._`;
-  await sock.sendMessage(groupId, { text: footerMsg });
-
-  lastBlastResult = {
-    success: true,
-    count: sentCount,
-    message: `Berjaya hantar ${sentCount} isu keselamatan ke group "${TARGET_GROUP_NAME}".`,
-    time: lastCheckTime
-  };
-  console.log(`[Blast Complete] ${lastBlastResult.message}\n========================================\n`);
-  return lastBlastResult;
 }
 
 /**
@@ -449,9 +494,9 @@ app.get('/groups', async (req, res) => {
   }
 });
 
-// Manual Test Trigger via Web Button
+// Manual Test Trigger via Web Button (bypasses cooldown with force=true)
 app.get('/test-blast', async (req, res) => {
-  await executeFindingsBlast('Manual Test via Web');
+  await executeFindingsBlast('Manual Test via Web', true);
   res.redirect('/');
 });
 
@@ -480,7 +525,8 @@ app.all('/api/blast', async (req, res) => {
         return;
       }
 
-      await executeFindingsBlast('Cron Webhook (cron-job.org)');
+      // force=false ensures it respects the 10-minute cooldown
+      await executeFindingsBlast('Cron Webhook (cron-job.org)', false);
     } catch (err) {
       console.error('[Webhook Background Error]:', err);
     }
@@ -498,7 +544,7 @@ app.all('/health', (req, res) => {
 // Morning Blast: 8:30 AM MYT
 cron.schedule(process.env.CRON_MORNING || '30 8 * * *', () => {
   console.log('[Cron Trigger] Menjalankan Morning Safety Findings Blast...');
-  executeFindingsBlast('Scheduled (Morning 8:30 AM)');
+  executeFindingsBlast('Scheduled (Morning 8:30 AM)', false);
 }, {
   timezone: 'Asia/Kuala_Lumpur'
 });
@@ -506,7 +552,7 @@ cron.schedule(process.env.CRON_MORNING || '30 8 * * *', () => {
 // Afternoon Blast: 4:30 PM MYT
 cron.schedule(process.env.CRON_AFTERNOON || '30 16 * * *', () => {
   console.log('[Cron Trigger] Menjalankan Afternoon Safety Findings Blast...');
-  executeFindingsBlast('Scheduled (Afternoon 4:30 PM)');
+  executeFindingsBlast('Scheduled (Afternoon 4:30 PM)', false);
 }, {
   timezone: 'Asia/Kuala_Lumpur'
 });
